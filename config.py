@@ -51,10 +51,3 @@ class Settings(BaseSettings):
     )
 
 
-@lru_cache()
-def get_settings() -> Settings:
-    """
-    Cached settings instance so config is read once per process.
-    Environment variables always override values from dotenv files.
-    """
-    return Settings()
