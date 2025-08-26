@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from typing import TypedDict, Annotated, List, Optional, Any, Dict, Required, NotRequired
+import asyncio
 import json
 import logging
 from pathlib import Path
+from typing import TypedDict, Annotated, List, Optional, Any, Dict, Required, NotRequired
 
 from azure.core.credentials import AzureKeyCredential
 from azure.ai.documentintelligence import DocumentIntelligenceClient
@@ -103,7 +104,7 @@ def _min_span_offset(spans: Optional[List[DocumentSpan]]) -> int:
         return 0
     return min(s.offset for s in spans if hasattr(s, "offset"))
 
-def extract_text_from_pdf(state: ProcessingState) -> ProcessingState:
+async def extract_text_from_pdf(state: ProcessingState) -> ProcessingState:
     """
     Extract text from PDF using Azure Document Intelligence.
     """
@@ -117,7 +118,8 @@ def extract_text_from_pdf(state: ProcessingState) -> ProcessingState:
 
         # Read PDF file and pass the file stream directly
         with open(pdf_path, "rb") as f:
-            poller = document_intelligence_client.begin_analyze_document(
+            poller = await asyncio.to_thread(
+                document_intelligence_client.begin_analyze_document,
                 "prebuilt-layout",
                 body=f,  # pass stream, not f.read()
             )
@@ -171,7 +173,7 @@ def extract_text_from_pdf(state: ProcessingState) -> ProcessingState:
             "processing_status": "ocr_failed",
         }
 
-def structure_resume_data(state: ProcessingState) -> ProcessingState:
+async def structure_resume_data(state: ProcessingState) -> ProcessingState:
     """
     Use the LLM to structure the extracted resume text into the Resume schema.
     Handles both Pydantic BaseModel and dict return types.
@@ -180,7 +182,7 @@ def structure_resume_data(state: ProcessingState) -> ProcessingState:
         logger.info("Starting LLM-based data structuring")
         structured_llm = llm.with_structured_output(Resume)
         extraction_chain = EXTRACTION_PROMPT | structured_llm
-        structured_resume = extraction_chain.invoke({"resume_text": state["extracted_text"]})
+        structured_resume = await extraction_chain.ainvoke({"resume_text": state["extracted_text"]})
 
         if isinstance(structured_resume, BaseModel):
             structured_data: Dict[str, Any] = structured_resume.model_dump()
@@ -196,7 +198,7 @@ def structure_resume_data(state: ProcessingState) -> ProcessingState:
         logger.error("%s", error_msg)
         return {**state, "error_message": error_msg, "processing_status": "structuring_failed"}
 
-def should_continue_processing(state: ProcessingState) -> str:
+async def should_continue_processing(state: ProcessingState) -> str:
     if state.get("error_message"):
         return END
     status = state.get("processing_status", "")
@@ -234,7 +236,7 @@ class CVProcessor:
     def __init__(self) -> None:
         self.workflow = create_cv_processing_workflow()
 
-    def process_resume(self, pdf_path: str, output_path: Optional[str] = None) -> dict:
+    async def process_resume(self, pdf_path: str, output_path: Optional[str] = None) -> dict:
         initial_state: ProcessingState = {
             "pdf_path": pdf_path,
             "extracted_text": "",
@@ -242,7 +244,7 @@ class CVProcessor:
             "error_message": None,
             "processing_status": "initialized",
         }
-        final_state = self.workflow.invoke(initial_state)
+        final_state = await self.workflow.ainvoke(initial_state)
 
         if final_state.get("error_message"):
             raise ValueError(final_state["error_message"])
