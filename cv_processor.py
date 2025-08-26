@@ -67,6 +67,7 @@ class Resume(BaseModel):
     education: Education = Field(description="Education history", default_factory=Education)
     skills: List[str] = Field(description="List of skills and competencies", default_factory=list)
     projects: List[Project] = Field(description="List of notable projects", default_factory=list)
+    candidate_description: str = Field(description="Concise summarization of the whole CV", default="")
 
 # LangGraph State Definition (use PEP 655 Required/NotRequired to satisfy Pylance)
 class ProcessingState(TypedDict):
@@ -76,7 +77,7 @@ class ProcessingState(TypedDict):
     error_message: NotRequired[Optional[str]]
     processing_status: Required[str]
 
-# Prompt Template
+# Prompt Template (updated to include summarization instruction)
 EXTRACTION_PROMPT = ChatPromptTemplate.from_template(
     """You are an expert HR data extraction specialist. Extract information from the following resume text and structure it according to the provided schema.
 
@@ -90,6 +91,7 @@ Instructions:
 - Format dates as YYYY-MM-DD when possible
 - For current positions, use "Present" as end date
 - Be precise and avoid hallucinations
+- Generate a concise summarization of the whole CV in the 'candidate_description' field, highlighting key experiences, skills, and qualifications
 """
 )
 
