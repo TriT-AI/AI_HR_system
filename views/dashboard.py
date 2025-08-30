@@ -3,6 +3,8 @@ import utils  # Import shared utilities (CSS, theme, session, helpers)
 import pandas as pd
 import altair as alt
 from typing import List, Tuple
+from datetime import datetime
+from collections import defaultdict
 
 
 # -------------------------
@@ -27,11 +29,11 @@ def get_filtered_candidates(
 ) -> pd.DataFrame:
     """
     Returns dataframe with columns:
-      candidate_id, name, skills_matched, years_experience
+      candidate_id, name, skills_matched
     Filters:
       - job_titles: list of keywords OR-matched on work_experience.job_title
-      - min_years_exp: minimum total years
       - top_skills: candidate must have at least one of these skills (IN)
+    Note: years_experience is calculated separately in Python and added later.
     """
     conn = st.session_state.db.conn
 
@@ -60,15 +62,14 @@ def get_filtered_candidates(
         else ""
     )
 
-    # Params order: job titles, skills, min years
-    sql_params: List = job_title_params + skill_params + [min_years_exp]
+    # Params order: job titles, skills
+    sql_params: List = job_title_params + skill_params
 
     sql = f"""
     SELECT
         c.candidate_id,
         c.name,
-        COUNT(DISTINCT sm.skill_name) AS skills_matched,
-        SUM(COALESCE(JULIAN(COALESCE(we.end_date, CURRENT_DATE)) - JULIAN(we.start_date), 0)) / 365.25 AS years_experience
+        COUNT(DISTINCT sm.skill_name) AS skills_matched
     FROM candidates c
     LEFT JOIN work_experience we ON c.candidate_id = we.candidate_id
     LEFT JOIN candidate_skills cs ON c.candidate_id = cs.candidate_id
@@ -81,10 +82,54 @@ def get_filtered_candidates(
         sql += f" AND c.candidate_id IN ({skill_filter_sql})"
 
     sql += " GROUP BY c.candidate_id, c.name"
-    sql += " HAVING years_experience >= ?"
-    sql += " ORDER BY skills_matched DESC, years_experience DESC"
+    sql += " ORDER BY skills_matched DESC"
 
     return conn.execute(sql, sql_params).fetchdf()
+
+
+@st.cache_data(ttl=60)
+def calculate_years_experience(candidate_ids: List[int]) -> dict:
+    """
+    Query raw work experience dates and calculate total years experience per candidate in Python.
+    Handles ongoing jobs (null end_date = current date) and skips invalid dates.
+    Returns dict: candidate_id -> total_years_exp (float).
+    """
+    conn = st.session_state.db.conn
+
+    if not candidate_ids:
+        return {}
+
+    sql = f"""
+    SELECT candidate_id, start_date, end_date
+    FROM work_experience
+    WHERE candidate_id IN ({','.join(['?']*len(candidate_ids))})
+    """
+
+    rows = conn.execute(sql, candidate_ids).fetchall()
+
+    exp_map = defaultdict(float)
+    today = datetime.now().date()
+
+    for candidate_id, start_date_str, end_date_str in rows:
+        try:
+            start_date = (
+                pd.to_datetime(start_date_str).date() if start_date_str else None
+            )
+            end_date = pd.to_datetime(end_date_str).date() if end_date_str else today
+
+            if start_date is None or end_date < start_date:
+                continue  # Skip invalid
+
+            duration_days = (end_date - start_date).days
+            exp_map[candidate_id] += duration_days
+        except Exception:
+            continue  # Skip parsing errors
+
+    # Convert to years
+    for cid in exp_map:
+        exp_map[cid] = exp_map[cid] / 365.25
+
+    return exp_map
 
 
 @st.cache_data(ttl=60)
@@ -155,27 +200,37 @@ def main():
         icon="💡",
     )
 
-    # Sidebar Filters
-    st.sidebar.header("Filters")
-    job_titles_str = st.sidebar.text_input(
-        "Job Title Keywords (comma separated)", value=""
-    )
-    job_titles = [jt.strip() for jt in job_titles_str.split(",") if jt.strip()]
+    # Filters in main area (expander for clean UX)
+    with st.expander("🛠️ Advanced Filtering", expanded=True):
+        col1, col2, col3 = st.columns([3, 2, 1])
+        with col1:
+            job_titles_str = st.text_input(
+                "Job Title Keywords (comma separated)", value=""
+            )
+            job_titles = [jt.strip() for jt in job_titles_str.split(",") if jt.strip()]
 
-    min_years_exp = st.sidebar.slider("Minimum Total Years Experience", 0, 40, 0)
+        with col2:
+            min_years_exp = st.slider("Minimum Total Years Experience", 0, 40, 0)
 
-    top_skills_df = fetch_top_skills(50)
-    skills_options = top_skills_df["skill"].tolist()
-    default_skills = skills_options[:5]
-    selected_skills = st.sidebar.multiselect(
-        "Top 5 Skills (max 5)", options=skills_options, default=default_skills
-    )
-    if len(selected_skills) > 5:
-        st.sidebar.warning("Please select at most 5 skills.")
+        with col3:
+            st.markdown("<br>", unsafe_allow_html=True)  # Align button
+            apply = st.button("Apply Filters", type="primary")
 
-    apply = st.sidebar.button("Apply Filters", type="primary")
+        # Skills filter: Only top 5 common skills, multiselect up to all
+        top_skills_df = fetch_top_skills(5)  # Limit to top 5
+        skills_options = top_skills_df["skill"].tolist()
+        selected_skills = st.multiselect(
+            "Select from Top 5 Common Skills",
+            options=skills_options,
+            default=[],
+            help="Choose up to 5 from the most common skills in the database.",
+        )
 
-    # Active filter pills
+        # Reset button
+        if st.button("Reset All Filters"):
+            st.session_state.pop("dashboard_last_filtered", None)
+
+    # Active filter pills below expander
     with st.container():
         st.markdown("### Active Filters")
         pills = []
@@ -195,6 +250,13 @@ def main():
     # Compute filtered data
     if apply or "dashboard_last_filtered" not in st.session_state:
         filtered = get_filtered_candidates(job_titles, min_years_exp, selected_skills)
+        # Add accurate years_experience calculated in Python
+        years_exp_map = calculate_years_experience(filtered["candidate_id"].tolist())
+        filtered["years_experience"] = (
+            filtered["candidate_id"].map(years_exp_map).fillna(0)
+        )
+        # Re-apply min_years_exp filter after accurate calculation
+        filtered = filtered[filtered["years_experience"] >= min_years_exp]
         st.session_state["dashboard_last_filtered"] = filtered
     else:
         filtered = st.session_state["dashboard_last_filtered"]
