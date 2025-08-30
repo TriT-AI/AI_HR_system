@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import List, Dict, Any
 
 import pandas as pd
-import json
+import altair as alt
 from PIL import Image
 import streamlit as st
 
@@ -60,6 +60,8 @@ st.markdown("""
     .progress-bar { height: 8px; background: #e2e8f0; border-radius: 4px; overflow: hidden; }
     .progress-fill { height: 100%; background: linear-gradient(to right, #22c55e, #3b82f6); }
     .footer { text-align: center; color: #64748b; font-size: 0.875rem; margin-top: 2rem; padding: 1rem 0; border-top: 1px solid #e2e8f0; }
+    .highlight { background: #dbeafe; padding: 0.5rem; border-radius: 4px; }
+    .insight-card { background: #f0fdf4; border-left: 4px solid #22c55e; padding: 1rem; margin: 1rem 0; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -269,37 +271,54 @@ elif page == "🔍 Search & Match":
 
     with tab1:
         st.header("Search Candidates")
-        skill = st.text_input("Enter skill keyword", placeholder="e.g., Python, SQL", help="Case-insensitive search")
-        if st.button("Search"):
+        st.info("Search by skills, experience, or other criteria. Results are ranked by relevance.", icon="💡")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            skill = st.text_input("Skill Keyword", placeholder="e.g., Python, SQL", help="Search for specific skills")
+        with col2:
+            min_experience = st.number_input("Min Years Experience", min_value=0, value=0)
+        
+        if st.button("Search", type="primary"):
             with st.spinner("Searching..."):
-                rows = st.session_state.db.search_candidates_by_skill(skill)
+                # Assuming db has an advanced search method; adjust as needed
+                rows = st.session_state.db.search_candidates_by_skill(skill)  # Enhance this method if needed
             if rows:
                 st.success(f"Found {len(rows)} candidates")
                 for cid, name, email, phone, desc in rows:
                     st.markdown(f"""
                         <div class="card">
                             <h4>{name} (ID: {cid})</h4>
+                            <p class="highlight">Summary: {desc or 'No summary available'}</p>
                             <p class="muted">Email: {email} | Phone: {phone}</p>
-                            <p>{desc or 'No summary available'}</p>
+                            <div class="insight-card">Quick Insight: Strong match for queried skills</div>
                         </div>
                     """, unsafe_allow_html=True)
             else:
-                st.info("No candidates found for this skill.")
+                st.info("No candidates found. Try broadening your search.")
 
     with tab2:
         st.header("AI Job Matching")
-        job_desc = st.text_area("Job Description", height=200, placeholder="Describe the role, skills, experience...")
-        top_n = st.slider("Number of top candidates", 1, 10, 5)
+        st.info("Enter job details for AI-powered matching. Highlights include match scores and gap analysis.", icon="💡")
+        
+        job_desc = st.text_area("Job Description", height=200, placeholder="Describe the role, required skills, experience...")
+        col1, col2 = st.columns(2)
+        with col1:
+            top_n = st.slider("Number of top candidates", 1, 20, 5)
+        with col2:
+            min_score = st.slider("Minimum Match Score", 0.0, 1.0, 0.5)
+        
         if st.button("Match Candidates", type="primary"):
-            with st.spinner("Matching..."):
+            with st.spinner("Analyzing and matching..."):
                 try:
                     matches = run_async(st.session_state.job_matcher.find_best_candidates(job_desc, top_n))
-                    if matches:
-                        st.success(f"Top {len(matches)} matches found")
+                    filtered_matches = [m for m in matches if m[1].match_score >= min_score]
+                    if filtered_matches:
+                        st.success(f"Found {len(filtered_matches)} matching candidates above {min_score*100:.0f}% score")
                         st.markdown("---")
                         st.subheader("📊 Candidate Pool Analysis")
                         
-                        gap_insights = st.session_state.job_matcher.get_gap_insights(matches)
+                        gap_insights = st.session_state.job_matcher.get_gap_insights(filtered_matches)
                         for insight in gap_insights:
                             if insight.startswith("**"):
                                 st.markdown(insight)
@@ -310,13 +329,13 @@ elif page == "🔍 Search & Match":
                         
                         # Optional: Show detailed gap statistics
                         with st.expander("🔍 Detailed Gap Statistics"):
-                            gap_summary = st.session_state.job_matcher.analyze_candidate_gaps(matches)
+                            gap_summary = st.session_state.job_matcher.analyze_candidate_gaps(filtered_matches)
                             st.json(gap_summary.model_dump())
                         
-                        for i, (cand, match) in enumerate(matches, 1):
+                        for i, (cand, match) in enumerate(filtered_matches, 1):
                             st.markdown(f"""
                                 <div class="card">
-                                    <h4>#{i} {cand['name']} (Score: {match.match_score:.0%})</h4>
+                                    <h4>#{i} {cand['name']} <span class="highlight">Score: {match.match_score:.0%}</span></h4>
                                     <p class="muted">Email: {cand['email']} | Phone: {cand['phone']}</p>
                                     <div>Skills: {', '.join(cand['skills'][:5]) + ('...' if len(cand['skills']) > 5 else '')}</div>
                                     <div class="progress-bar"><div class="progress-fill" style="width:{match.match_score * 100}%"></div></div>
@@ -329,26 +348,67 @@ elif page == "🔍 Search & Match":
                                 </div>
                             """, unsafe_allow_html=True)
                     else:
-                        st.warning("No candidates available.")
+                        st.warning("No candidates meet the criteria.")
                 except Exception as e:
                     st.error(f"Error: {e}")
 
 elif page == "📊 Dashboard":
     st.header("System Dashboard")
-    inflow = st.session_state.db.conn.execute("SELECT strftime('%Y-%m', created_at) AS month, COUNT(*) AS cnt FROM candidates GROUP BY month ORDER BY month").fetchdf()
-    if not inflow.empty:
-        st.subheader("Candidate Inflow")
-        st.line_chart(inflow.set_index("month"))
-
+    st.info("Key insights into your candidate pool. Hover over charts for details.", icon="💡")
+    
+    # Top Skills
     top_skills = st.session_state.db.conn.execute("SELECT sm.skill_name AS skill, COUNT(*) AS cnt FROM skills_master sm JOIN candidate_skills cs ON sm.skill_id = cs.skill_id GROUP BY sm.skill_name ORDER BY cnt DESC LIMIT 10").fetchdf()
-    if not top_skills.empty:
-        st.subheader("Top Skills")
-        st.bar_chart(top_skills.set_index("skill"))
 
+    # Overall Insights Summary
+    st.markdown("### Key Insights")
+    total_candidates = stats.get("total_candidates", 0)
+    avg_skills = stats.get("total_skills", 0) / total_candidates if total_candidates > 0 else 0
+    st.markdown(f"<div class='insight-card'>Total Candidates: <b>{total_candidates}</b> | Average Skills per Candidate: <b>{avg_skills:.1f}</b></div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='insight-card'>Most Common Skill: <b>{top_skills.iloc[0]['skill'] if not top_skills.empty else 'N/A'}</b> (Appears in {top_skills.iloc[0]['cnt'] if not top_skills.empty else 0} resumes)</div>", unsafe_allow_html=True)
+
+    
+    
+    if not top_skills.empty:
+        st.subheader("Top 10 Skills Distribution")
+        skills_chart = alt.Chart(top_skills).mark_bar().encode(
+            x=alt.X('cnt:Q', title='Count'),
+            y=alt.Y('skill:N', sort='-x', title='Skill'),
+            color=alt.Color('cnt:Q', scale=alt.Scale(scheme='blues')),
+            tooltip=['skill', 'cnt']
+        ).properties(height=300)
+        st.altair_chart(skills_chart, use_container_width=True)
+    else:
+        st.info("No skills data yet.")
+
+    # Graduation Years
     grad = st.session_state.db.conn.execute("SELECT graduation_year AS year, COUNT(*) AS cnt FROM education WHERE graduation_year <> '' GROUP BY graduation_year ORDER BY year").fetchdf()
     if not grad.empty:
-        st.subheader("Graduation Years")
-        st.bar_chart(grad.set_index("year"))
+        st.subheader("Graduation Year Distribution")
+        grad_chart = alt.Chart(grad).mark_bar().encode(
+            x='year:N',
+            y='cnt:Q',
+            tooltip=['year', 'cnt']
+        ).properties(height=300)
+        st.altair_chart(grad_chart, use_container_width=True)
+    else:
+        st.info("No graduation data yet.")
+
+
+
+
+    # Candidate Inflow
+    inflow = st.session_state.db.conn.execute("SELECT strftime('%Y-%m', created_at) AS month, COUNT(*) AS cnt FROM candidates GROUP BY month ORDER BY month").fetchdf()
+    if not inflow.empty:
+        st.subheader("Candidate Inflow Over Time")
+        inflow_chart = alt.Chart(inflow).mark_line(point=True).encode(
+            x='month:T',
+            y='cnt:Q',
+            tooltip=['month', 'cnt']
+        ).interactive()
+        st.altair_chart(inflow_chart, use_container_width=True)
+    else:
+        st.info("No candidate inflow data yet.")
+
 
 # Footer
 st.markdown("<div class='footer'>© 2025 HR System</div>", unsafe_allow_html=True)
