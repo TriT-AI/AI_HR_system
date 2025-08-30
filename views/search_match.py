@@ -46,7 +46,6 @@ def main():
                             <div class="card">
                                 <p><b>Summary:</b> {desc or 'No summary available'}</p>
                                 <p>Email: {email} | Phone: {phone}</p>
-                                <div class="insight-card">Quick Insight: Strong match for queried skills</div>
                             </div>
                             """,
                             unsafe_allow_html=True,

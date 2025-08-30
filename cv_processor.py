@@ -34,10 +34,12 @@ llm = AzureChatOpenAI(
     api_version=settings.AZURE_OPENAI_API_VERSION,
 )
 
+
 # Pydantic Models for Structured Output
 class ContactInfo(BaseModel):
     email: str = Field(description="Candidate's email address", default="")
     phone: str = Field(description="Candidate's phone number", default="")
+
 
 class EmploymentRecord(BaseModel):
     position: str = Field(description="Job title/position", default="")
@@ -46,29 +48,51 @@ class EmploymentRecord(BaseModel):
     end_date: str = Field(description="End date (YYYY-MM-DD or 'Present')", default="")
     summary: str = Field(description="Job description and responsibilities", default="")
 
+
 class EducationRecord(BaseModel):
     institution: str = Field(description="Educational institution name", default="")
     degree: str = Field(description="Degree or field of study", default="")
     graduation_year: str = Field(description="Graduation year", default="")
 
+
 class Project(BaseModel):
     name: str = Field(description="Project name", default="")
     description: str = Field(description="Project description", default="")
 
+
 class Employment(BaseModel):
-    history: List[EmploymentRecord] = Field(description="List of employment records", default_factory=list)
+    history: List[EmploymentRecord] = Field(
+        description="List of employment records", default_factory=list
+    )
+
 
 class Education(BaseModel):
-    history: List[EducationRecord] = Field(description="List of education records", default_factory=list)
+    history: List[EducationRecord] = Field(
+        description="List of education records", default_factory=list
+    )
+
 
 class Resume(BaseModel):
     name: str = Field(description="Full name of the candidate", default="")
-    contact: ContactInfo = Field(description="Contact information", default_factory=ContactInfo)
-    employment: Employment = Field(description="Employment history", default_factory=Employment)
-    education: Education = Field(description="Education history", default_factory=Education)
-    skills: List[str] = Field(description="List of skills and competencies", default_factory=list)
-    projects: List[Project] = Field(description="List of notable projects", default_factory=list)
-    candidate_description: str = Field(description="Concise summarization of the whole CV", default="")
+    contact: ContactInfo = Field(
+        description="Contact information", default_factory=ContactInfo
+    )
+    employment: Employment = Field(
+        description="Employment history", default_factory=Employment
+    )
+    education: Education = Field(
+        description="Education history", default_factory=Education
+    )
+    skills: List[str] = Field(
+        description="List of skills and competencies", default_factory=list
+    )
+    projects: List[Project] = Field(
+        description="List of notable projects", default_factory=list
+    )
+    candidate_description: str = Field(
+        description="Concise summarization of the whole CV", default=""
+    )
+
 
 # LangGraph State Definition
 class ProcessingState(TypedDict):
@@ -78,9 +102,11 @@ class ProcessingState(TypedDict):
     error_message: NotRequired[Optional[str]]
     processing_status: Required[str]
 
-# Prompt Template
+
+# Prompt Template (Updated to follow HR Open Standards for standardization)
 EXTRACTION_PROMPT = ChatPromptTemplate.from_template(
     """You are an expert HR data extraction specialist. Extract information from the following resume text and structure it according to the provided schema.
+    Follow the HR Open Standards Consortium guidelines (formerly HR-XML) for standardizing HR data, including resume parsing schemas for candidate profiles, employment history, education, skills, and competencies. This ensures consistency, interoperability, and normalization of values.
 
 Resume Text:
 {resume_text}
@@ -94,8 +120,16 @@ Instructions:
 - For current positions, use "Present" as end date
 - Be precise and avoid hallucinations
 - Generate a concise summarization of the whole CV in the 'candidate_description' field, highlighting key experiences, skills, and qualifications
+- Standardize values according to HR Open Standards:
+  - For job titles (position): Normalize to consistent nomenclature, using categories like individual contributor levels (e.g., Associate, Senior) or management levels (e.g., Manager, Director). Avoid abbreviations unless standard; ensure titles reflect occupational hierarchies.
+  - For employers: Use full, standardized company names where possible, avoiding acronyms unless commonly recognized.
+  - For education (degree, institution): Standardize degree names (e.g., 'Bachelor of Science' instead of variations) and institution names to common formats.
+  - For skills: Map to standardized competency terms; group similar skills and use precise, industry-standard phrasing (e.g., 'Python Programming' instead of just 'Python').
+  - For projects: Ensure names and descriptions are clear and aligned with professional standards.
+  - If a value doesn't perfectly match the resume, choose the closest standardized equivalent without inventing information; leave as-is if no clear match.
 """
 )
+
 
 def _min_span_offset(spans: Optional[List[DocumentSpan]]) -> int:
     """
@@ -105,12 +139,15 @@ def _min_span_offset(spans: Optional[List[DocumentSpan]]) -> int:
         return 0
     return min(s.offset for s in spans if hasattr(s, "offset"))
 
+
 async def extract_text_from_pdf(state: ProcessingState) -> ProcessingState:
     """
     Extract text from PDF using Azure Document Intelligence.
     """
     try:
-        logger.info("Starting Azure Document Intelligence extraction for: %s", state["pdf_path"])
+        logger.info(
+            "Starting Azure Document Intelligence extraction for: %s", state["pdf_path"]
+        )
 
         pdf_path = Path(state["pdf_path"])
         if not pdf_path.exists():
@@ -130,12 +167,17 @@ async def extract_text_from_pdf(state: ProcessingState) -> ProcessingState:
         # Method 1: content property
         if getattr(result, "content", None):
             extracted_text = result.content
-            logger.info("Extracted text from content property: %d characters", len(extracted_text))
+            logger.info(
+                "Extracted text from content property: %d characters",
+                len(extracted_text),
+            )
         # Method 2: paragraphs
         elif getattr(result, "paragraphs", None):
             paragraphs = result.paragraphs or []
             logger.info("Found %d paragraphs", len(paragraphs))
-            sorted_paragraphs = sorted(paragraphs, key=lambda p: _min_span_offset(p.spans))
+            sorted_paragraphs = sorted(
+                paragraphs, key=lambda p: _min_span_offset(p.spans)
+            )
             for paragraph in sorted_paragraphs:
                 if getattr(paragraph, "content", None):
                     extracted_text += paragraph.content + "\n"
@@ -150,9 +192,14 @@ async def extract_text_from_pdf(state: ProcessingState) -> ProcessingState:
                         extracted_text += line.content + "\n"
 
         if not extracted_text.strip():
-            raise ValueError("No text could be extracted from the PDF using Azure Document Intelligence")
+            raise ValueError(
+                "No text could be extracted from the PDF using Azure Document Intelligence"
+            )
 
-        logger.info("Successfully extracted %d characters using Azure Document Intelligence", len(extracted_text))
+        logger.info(
+            "Successfully extracted %d characters using Azure Document Intelligence",
+            len(extracted_text),
+        )
 
         return {
             **state,
@@ -169,6 +216,7 @@ async def extract_text_from_pdf(state: ProcessingState) -> ProcessingState:
             "processing_status": "ocr_failed",
         }
 
+
 async def structure_resume_data(state: ProcessingState) -> ProcessingState:
     """
     Use the LLM to structure the extracted resume text into the Resume schema.
@@ -178,7 +226,9 @@ async def structure_resume_data(state: ProcessingState) -> ProcessingState:
         logger.info("Starting LLM-based data structuring")
         structured_llm = llm.with_structured_output(Resume)
         extraction_chain = EXTRACTION_PROMPT | structured_llm
-        structured_resume = await extraction_chain.ainvoke({"resume_text": state["extracted_text"]})
+        structured_resume = await extraction_chain.ainvoke(
+            {"resume_text": state["extracted_text"]}
+        )
 
         # Always produce a plain dict for downstream consumers
         if isinstance(structured_resume, BaseModel):
@@ -187,18 +237,28 @@ async def structure_resume_data(state: ProcessingState) -> ProcessingState:
             structured_data = dict(structured_resume)
 
         logger.info("Successfully structured resume data")
-        return {**state, "structured_data": structured_data, "processing_status": "completed"}
+        return {
+            **state,
+            "structured_data": structured_data,
+            "processing_status": "completed",
+        }
 
     except Exception as e:
         error_msg = f"Data structuring failed: {e}"
         logger.error("%s", error_msg)
-        return {**state, "error_message": error_msg, "processing_status": "structuring_failed"}
+        return {
+            **state,
+            "error_message": error_msg,
+            "processing_status": "structuring_failed",
+        }
+
 
 async def should_continue_processing(state: ProcessingState) -> str:
     if state.get("error_message"):
         return END
     status = state.get("processing_status", "")
     return "structure_data" if status == "text_extracted" else END
+
 
 def create_cv_processing_workflow():
     workflow = StateGraph(ProcessingState)
@@ -227,11 +287,14 @@ def create_cv_processing_workflow():
 
     return compiled
 
+
 class CVProcessor:
     def __init__(self) -> None:
         self.workflow = create_cv_processing_workflow()
 
-    async def process_resume(self, pdf_path: str, output_path: Optional[str] = None) -> Dict[str, Any]:
+    async def process_resume(
+        self, pdf_path: str, output_path: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
         Run the CV processing workflow and return a JSON-serializable dict
         suitable for DB import and downstream use.
