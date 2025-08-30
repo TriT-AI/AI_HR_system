@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 from pathlib import Path
-from typing import TypedDict, Annotated, List, Optional, Any, Dict, Required, NotRequired
+from typing import TypedDict, List, Optional, Any, Dict, Required, NotRequired
 
 from azure.core.credentials import AzureKeyCredential
 from azure.ai.documentintelligence import DocumentIntelligenceClient
@@ -12,7 +12,7 @@ from azure.ai.documentintelligence.models import AnalyzeResult, DocumentSpan
 from langchain_openai import AzureChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import StateGraph, END
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import BaseModel, Field
 from config import get_settings
 
 settings = get_settings()
@@ -70,15 +70,15 @@ class Resume(BaseModel):
     projects: List[Project] = Field(description="List of notable projects", default_factory=list)
     candidate_description: str = Field(description="Concise summarization of the whole CV", default="")
 
-# LangGraph State Definition (use PEP 655 Required/NotRequired to satisfy Pylance)
+# LangGraph State Definition
 class ProcessingState(TypedDict):
     pdf_path: Required[str]
     extracted_text: Required[str]
-    structured_data: NotRequired[Optional[dict]]
+    structured_data: NotRequired[Optional[Dict[str, Any]]]
     error_message: NotRequired[Optional[str]]
     processing_status: Required[str]
 
-# Prompt Template (updated to include summarization instruction)
+# Prompt Template
 EXTRACTION_PROMPT = ChatPromptTemplate.from_template(
     """You are an expert HR data extraction specialist. Extract information from the following resume text and structure it according to the provided schema.
 
@@ -112,7 +112,6 @@ async def extract_text_from_pdf(state: ProcessingState) -> ProcessingState:
     try:
         logger.info("Starting Azure Document Intelligence extraction for: %s", state["pdf_path"])
 
-        # Validate file exists
         pdf_path = Path(state["pdf_path"])
         if not pdf_path.exists():
             raise FileNotFoundError(f"PDF file not found: {pdf_path}")
@@ -126,25 +125,21 @@ async def extract_text_from_pdf(state: ProcessingState) -> ProcessingState:
             )
             result: AnalyzeResult = poller.result()
 
-        # Extract text from the analysis result
         extracted_text = ""
 
-        # Method 1: Extract from content property (preferred in newer versions)
+        # Method 1: content property
         if getattr(result, "content", None):
             extracted_text = result.content
             logger.info("Extracted text from content property: %d characters", len(extracted_text))
-
-        # Method 2: Extract from paragraphs (preserves document structure)
+        # Method 2: paragraphs
         elif getattr(result, "paragraphs", None):
             paragraphs = result.paragraphs or []
             logger.info("Found %d paragraphs", len(paragraphs))
-            # Sort paragraphs by the minimum span offset (spans reference content offsets)
             sorted_paragraphs = sorted(paragraphs, key=lambda p: _min_span_offset(p.spans))
             for paragraph in sorted_paragraphs:
                 if getattr(paragraph, "content", None):
                     extracted_text += paragraph.content + "\n"
-
-        # Method 3: Fallback to pages if no paragraphs found
+        # Method 3: pages lines
         elif getattr(result, "pages", None):
             pages = result.pages or []
             logger.info("Found %d pages, extracting from lines", len(pages))
@@ -177,7 +172,7 @@ async def extract_text_from_pdf(state: ProcessingState) -> ProcessingState:
 async def structure_resume_data(state: ProcessingState) -> ProcessingState:
     """
     Use the LLM to structure the extracted resume text into the Resume schema.
-    Handles both Pydantic BaseModel and dict return types.
+    Returns a plain dict for structured_data to ensure JSON-serializable output.
     """
     try:
         logger.info("Starting LLM-based data structuring")
@@ -185,10 +180,10 @@ async def structure_resume_data(state: ProcessingState) -> ProcessingState:
         extraction_chain = EXTRACTION_PROMPT | structured_llm
         structured_resume = await extraction_chain.ainvoke({"resume_text": state["extracted_text"]})
 
+        # Always produce a plain dict for downstream consumers
         if isinstance(structured_resume, BaseModel):
             structured_data: Dict[str, Any] = structured_resume.model_dump()
         else:
-            # Accept dict-like as-is; ensure a plain dict for JSON serialization
             structured_data = dict(structured_resume)
 
         logger.info("Successfully structured resume data")
@@ -228,7 +223,6 @@ def create_cv_processing_workflow():
         compiled.get_graph().draw_mermaid_png(output_file_path=str(output_path))
         logger.info("Workflow diagram saved to: %s", output_path)
     except Exception as viz_err:
-        # Visualization is best-effort; keep going if it fails (e.g., no internet or missing deps)
         logger.warning("Could not render workflow diagram: %s", viz_err)
 
     return compiled
@@ -237,7 +231,11 @@ class CVProcessor:
     def __init__(self) -> None:
         self.workflow = create_cv_processing_workflow()
 
-    async def process_resume(self, pdf_path: str, output_path: Optional[str] = None) -> dict:
+    async def process_resume(self, pdf_path: str, output_path: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Run the CV processing workflow and return a JSON-serializable dict
+        suitable for DB import and downstream use.
+        """
         initial_state: ProcessingState = {
             "pdf_path": pdf_path,
             "extracted_text": "",
@@ -245,12 +243,13 @@ class CVProcessor:
             "error_message": None,
             "processing_status": "initialized",
         }
-        final_state = await self.workflow.ainvoke(initial_state)
+        final_state: ProcessingState = await self.workflow.ainvoke(initial_state)
 
         if final_state.get("error_message"):
             raise ValueError(final_state["error_message"])
 
-        structured_data = final_state.get("structured_data", {}) or {}
+        # Always return a dict
+        structured_data: Dict[str, Any] = final_state.get("structured_data", {}) or {}
 
         if output_path:
             with open(output_path, "w", encoding="utf-8") as f:

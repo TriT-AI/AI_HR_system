@@ -1,20 +1,23 @@
 """
-app.py – complete Streamlit front-end
+app.py – Polished Streamlit front-end for HR Resume Processing System
+- Modern, user-friendly design with intuitive navigation
+- Enhanced layouts with tabs, cards, and progress indicators
+- Improved error handling and feedback
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
-import concurrent.futures
 import logging
 import nest_asyncio
-import os
 import threading
+from io import BytesIO
 from pathlib import Path
-from typing import List
+from typing import List, Dict, Any
 
-import pandas as pd            # charts
+import pandas as pd
+import json
 from PIL import Image
 import streamlit as st
 
@@ -22,25 +25,47 @@ from cv_processor import CVProcessor
 from database import ResumeDatabase
 from job_matcher import JobMatcher
 from google_drive_processor import GoogleDriveProcessor
-from config import get_settings  # ADD THIS LINE
+from config import get_settings
 
-# Initialize settings
-settings = get_settings()  # ADD THIS LINE
-
-# ═════════════════════════════════ APP CONFIG ═══════════════════════════════════
+# =============================================================================
+# App Config + Theming
+# =============================================================================
 st.set_page_config(
     page_title="HR Resume Processing System",
     page_icon="📄",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-nest_asyncio.apply()  # Allow nested asyncio.run in Streamlit's event loop
-
-# Configure logging
+nest_asyncio.apply()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+settings = get_settings()
 
-# ═════════════════════════ SESSION SINGLETONS ═══════════════════════════════════
+# Custom CSS for enhanced UI
+st.markdown("""
+    <style>
+    /* General styling */
+    .stApp { background-color: #f8f9fc; }
+    .main { padding: 1rem; }
+    h1, h2, h3 { color: #1e3a8a; }
+    .stButton>button { background-color: #3b82f6; color: white; border-radius: 8px; }
+    .stButton>button:hover { background-color: #2563eb; }
+    .card { background: white; border-radius: 12px; padding: 1.5rem; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 1rem; }
+    .metric-card { background: #eff6ff; border-radius: 8px; padding: 1rem; text-align: center; }
+    .metric-value { font-size: 1.5rem; font-weight: bold; color: #1e40af; }
+    .metric-label { font-size: 0.9rem; color: #64748b; }
+    .tag { background: #dbeafe; color: #1e40af; padding: 0.25rem 0.75rem; border-radius: 20px; font-size: 0.875rem; margin: 0.25rem; display: inline-block; }
+    .warning-tag { background: #fef3c7; color: #92400e; }
+    .progress-bar { height: 8px; background: #e2e8f0; border-radius: 4px; overflow: hidden; }
+    .progress-fill { height: 100%; background: linear-gradient(to right, #22c55e, #3b82f6); }
+    .footer { text-align: center; color: #64748b; font-size: 0.875rem; margin-top: 2rem; padding: 1rem 0; border-top: 1px solid #e2e8f0; }
+    </style>
+""", unsafe_allow_html=True)
+
+# =============================================================================
+# Session Singletons
+# =============================================================================
 if "db" not in st.session_state:
     st.session_state.db = ResumeDatabase("hr_resume_system.db")
 
@@ -49,402 +74,281 @@ if "processor" not in st.session_state:
 
 if "job_matcher" not in st.session_state:
     st.session_state.job_matcher = JobMatcher(st.session_state.db)
-# Add this to session state initialization
+
 if "drive_processor" not in st.session_state:
     st.session_state.drive_processor = GoogleDriveProcessor(
-        st.session_state.processor, 
-        st.session_state.db
+        st.session_state.processor, st.session_state.db
     )
-# ════════════════════════════ HELPERS ═══════════════════════════════════════════
-def _save_uploaded_file(uploaded) -> Path:
-    """Persist an uploaded file to ./temp_uploads and return Path."""
-    dest = Path("temp_uploads") / uploaded.name
-    dest.parent.mkdir(exist_ok=True)
-    with open(dest, "wb") as fh:
-        fh.write(uploaded.getbuffer())
-    return dest
 
-def _load_png(path: str | Path) -> Image.Image | None:
-    p = Path(path)
-    return Image.open(p) if p.is_file() else None
+# =============================================================================
+# Helpers
+# =============================================================================
+def save_upload_and_cache_bytes(uploaded) -> tuple[Path, bytes]:
+    tmp_dir = Path("temp_uploads")
+    tmp_dir.mkdir(exist_ok=True)
+    tmp_path = tmp_dir / uploaded.name
+    content = uploaded.read()
+    with open(tmp_path, "wb") as f:
+        f.write(content)
+    return tmp_path, content
 
-def _embed_pdf(pdf_path: Path, height: int = 600) -> None:
-    """Display a PDF in-line using <iframe>."""
-    try:
-        b64 = base64.b64encode(pdf_path.read_bytes()).decode("utf-8")
-        html = (
-            f"<iframe src='data:application/pdf;base64,{b64}' "
-            f"width='100%' height='{height}px' type='application/pdf'></iframe>"
-        )
-        st.markdown(html, unsafe_allow_html=True)
-    except Exception as exc:
-        st.warning(f"Cannot preview PDF ({pdf_path.name}): {exc}")
+def embed_pdf_from_bytes(bytes_data, height=600):
+    b64 = base64.b64encode(bytes_data).decode('utf-8')
+    html = f"<iframe src='data:application/pdf;base64,{b64}' width='100%' height='{height}px'></iframe>"
+    st.markdown(html, unsafe_allow_html=True)
 
 def run_async(coroutine):
-    """Run an async coroutine synchronously, even inside Streamlit's event loop."""
     loop = asyncio.get_event_loop()
     if loop.is_running():
-        # Run in a separate thread to avoid blocking the main loop
         result_holder = {}
         def thread_target():
             try:
                 result_holder['result'] = asyncio.run(coroutine)
             except Exception as exc:
                 result_holder['error'] = exc
-
         th = threading.Thread(target=thread_target)
         th.start()
         th.join()
-
         if 'error' in result_holder:
             raise result_holder['error']
         return result_holder.get('result')
     else:
         return asyncio.run(coroutine)
 
-# ════════════════════════════ MAIN UI ═══════════════════════════════════════════
-st.title("HR Resume Processing System")
-st.markdown(
-    "Upload CVs (PDF or image) to extract structured data automatically and store "
-    "everything in the local DuckDB database."
-)
-
-# Navigation - single definition
-page = st.sidebar.radio(
-    "Navigation",
-    ["Upload & Process", "Search Candidates", "Job Matching", "Google Drive Sync", "Database Stats"],
-    help="Select a section",
-)
-
-# ───────────────────────────── Upload & Process ────────────────────────────────
-if page == "Upload & Process":
-    st.header("Upload and Process New Résumés")
-
-    # optional workflow diagram
-    with st.expander("Show CV-processing workflow diagram"):
-        wf = _load_png("images/cv_processing_workflow.png")
-        if wf:
-            st.image(wf, caption="LangGraph workflow", use_container_width=False)
-        else:
-            st.info("Diagram not found (images/cv_processing_workflow.png)")
-
-    uploaded_files = st.file_uploader(
-        "Choose one or more PDF or image files",
-        type=["pdf", "png", "jpg", "jpeg"],
-        accept_multiple_files=True,
-    )
-
-    # batch processing ----------------------------------------------------------
-    if uploaded_files:
-        st.info(f"{len(uploaded_files)} file(s) queued for processing.")
-
-        if st.button("Process Résumés"):
-            status = st.empty()
-            bar = st.progress(0)
-            results: List[dict] = []
-
-            for idx, upl in enumerate(uploaded_files, start=1):
-                status.text(f"Processing {idx}/{len(uploaded_files)} — {upl.name}")
-                tmp_path = _save_uploaded_file(upl)
-
-                # optional warning for image files
-                if tmp_path.suffix.lower() in {".png", ".jpg", ".jpeg"}:
-                    st.warning(
-                        f"Image '{upl.name}' treated as PDF – "
-                        "OCR for images is limited."
-                    )
-
-                # main pipeline (run async function synchronously)
-                try:
-                    structured = run_async(st.session_state.processor.process_resume(str(tmp_path)))
-                    cand_id = st.session_state.db.import_resume_data(structured)
-                    results.append(
-                        {
-                            "path": tmp_path,
-                            "name": upl.name,
-                            "candidate_id": cand_id,
-                            "data": structured,
-                        }
-                    )
-                except Exception as exc:
-                    st.error(f"❌ {upl.name}: {exc}")
-                finally:
-                    bar.progress(idx / len(uploaded_files))
-
-            status.text("Batch complete ✅")
-
-            # show interactive validation panels --------------------------------
-            st.subheader("Validation")
-            if results:
-                for res in results:
-                    with st.expander(f"{res['name']}  →  Candidate ID {res['candidate_id']}"):
-                        col_pdf, col_json = st.columns(2)
-                        with col_pdf:
-                            st.markdown("##### Original CV")
-                            if res["path"].suffix.lower() == ".pdf":
-                                _embed_pdf(res["path"])
-                            else:  # image preview
-                                img = _load_png(res["path"])
-                                if img:
-                                    st.image(img, use_container_width=True)
-                                else:
-                                    st.info("Preview unavailable.")
-                        with col_json:
-                            st.markdown("##### Extracted Data")
-                            st.json(res["data"], expanded=False)
-
-            # cleanup temporary files
-            for res in results:
-                try:
-                    res["path"].unlink(missing_ok=True)
-                except Exception:
-                    pass
-
-    else:
-        st.info("Please upload CV files to begin.")
-
-# ───────────────────────────── Search Candidates ───────────────────────────────
-elif page == "Search Candidates":
-    st.header("Search Candidates by Skill")
-    skill = st.text_input("Skill keyword (e.g. *Python*, *SQL*)")
-
-    if st.button("Search") and skill:
-        with st.spinner("Searching…"):
-            rows = st.session_state.db.search_candidates_by_skill(skill)
-        if rows:
-            st.success(f"Found {len(rows)} candidate(s) for '{skill}'")
-            for cid, name, email, phone, desc in rows:
-                st.markdown(f"**Name:** {name}")
-                st.markdown(f"**Email:** {email}")
-                st.markdown(f"**Phone:** {phone}")
-                st.markdown(f"**Summary:** {desc or '—'}")
-                st.divider()
-        else:
-            st.warning("No matches.")
-
-# ───────────────────────────── Job Matching ─────────────────────────────────────
-elif page == "Job Matching":
-    st.header("AI-Powered Job Matching")
-    st.markdown("Enter a job description to find the best matching candidates with detailed analysis.")
-    
-    # Job description input
-    job_description = st.text_area(
-        "Job Description",
-        height=200,
-        placeholder="Enter the complete job description including required skills, experience level, responsibilities, etc.",
-        help="Provide a detailed job description for accurate candidate matching"
-    )
-    
-    # Number of candidates to show
-    top_n = st.slider("Number of top candidates to show", min_value=1, max_value=10, value=5)
-    
-    if st.button("Find Best Candidates", type="primary") and job_description.strip():
-        with st.spinner("Analyzing job requirements and evaluating candidates..."):
-            try:
-                # Run the async matching function
-                matches = run_async(st.session_state.job_matcher.find_best_candidates(job_description, top_n))
-                
-                if matches:
-                    st.success(f"Found {len(matches)} candidates. Results ranked by match score:")
-                    
-                    # Display results
-                    for i, (candidate_details, match_result) in enumerate(matches, 1):
-                        with st.expander(
-                            f"#{i} - {candidate_details['name']} "
-                            f"(Match: {match_result.match_score:.1%})",
-                            expanded=i <= 3  # Expand top 3 by default
-                        ):
-                            # Create columns for better layout
-                            col1, col2 = st.columns([2, 1])
-                            
-                            with col1:
-                                st.markdown("##### Match Analysis")
-                                st.markdown(f"**Overall Match Score:** {match_result.match_score:.1%}")
-                                st.markdown(f"**Skills Match:** {match_result.skill_match_score:.1%}")
-                                st.markdown(f"**Experience Match:** {match_result.experience_match_score:.1%}")
-                                
-                                st.markdown("##### Reasoning")
-                                st.markdown(match_result.reasoning)
-                                
-                                if match_result.strengths:
-                                    st.markdown("##### Key Strengths")
-                                    for strength in match_result.strengths:
-                                        st.markdown(f"✅ {strength}")
-                                
-                                if match_result.gaps:
-                                    st.markdown("##### Potential Development Areas")
-                                    for gap in match_result.gaps:
-                                        st.markdown(f"⚠️ {gap}")
-                            
-                            with col2:
-                                st.markdown("##### Candidate Details")
-                                st.markdown(f"**Email:** {candidate_details['email']}")
-                                st.markdown(f"**Phone:** {candidate_details['phone']}")
-                                
-                                if candidate_details['skills']:
-                                    st.markdown("**Skills:**")
-                                    skills_text = ", ".join(candidate_details['skills'][:10])  # Show first 10 skills
-                                    if len(candidate_details['skills']) > 10:
-                                        skills_text += f" (+{len(candidate_details['skills']) - 10} more)"
-                                    st.markdown(skills_text)
-                                
-                                if candidate_details['description']:
-                                    st.markdown("**Summary:**")
-                                    st.markdown(candidate_details['description'][:200] + "..." if len(candidate_details['description']) > 200 else candidate_details['description'])
-                
-                else:
-                    st.warning("No candidates found in the database.")
-                    
-            except Exception as e:
-                st.error(f"An error occurred during matching: {e}")
-                logger.error(f"Job matching error: {e}")
-    
-    elif not job_description.strip():
-        st.info("Please enter a job description to begin matching.")
-# ───────────────────────────── Google Drive Sync ──────────────────────────────────
-
-# Add this new section after Job Matching section
-elif page == "Google Drive Sync":
-    st.header("🔄 Google Drive CV Processing")
-    st.markdown("Automatically process new CVs from your Google Drive folder.")
-    
-    # Configuration status
-    drive_stats = st.session_state.drive_processor.get_drive_stats()
-    
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Total Processed", drive_stats["total_processed_files"])
-    col2.metric("Last 7 Days", drive_stats["files_processed_last_week"])
-    col3.metric("Status", "✅ Configured" if drive_stats["configured"] else "❌ Not Configured")
-    
-    if not drive_stats["configured"]:
-        st.error("⚠️ Google Drive is not properly configured!")
-        st.markdown("""
-        **Setup Instructions:**
-        1. Add your `GOOGLE_DRIVE_API_KEY` to your `.env` file
-        2. Add your `GOOGLE_DRIVE_FOLDER_ID` to your `.env` file
-        3. Restart the application
-        """)
-        st.info("💡 **How to get Google Drive API Key:** Visit [Google Cloud Console](https://console.cloud.google.com/) → APIs & Services → Credentials")
-    else:
-        st.success("✅ Google Drive integration is configured and ready!")
-        
-        # Folder info
-        with st.expander("📁 Folder Configuration"):
-            st.code(f"Folder ID: {settings.GOOGLE_DRIVE_FOLDER_ID}")
-            st.markdown(f"**Folder URL:** https://drive.google.com/drive/folders/{settings.GOOGLE_DRIVE_FOLDER_ID}")
-        
-        # Manual sync button
-        # col1, col2 = st.columns([1, 3])
-        
-        # with col1:
-        if st.button("🔄 Check for New CVs", type="primary"):
-            with st.spinner("Checking Google Drive for new PDF files..."):
-                try:
-                    new_files = run_async(st.session_state.drive_processor.process_new_files())
-                    
-                    if new_files:
-                        st.success(f"✅ Successfully processed {len(new_files)} new CV(s)!")
-                        
-                        # Show results
-                        st.subheader("📋 Processing Results")
-                        for result in new_files:
-                            with st.expander(f"✅ {result['file_name']} → Candidate ID {result['candidate_id']}"):
-                                col_info, col_data = st.columns(2)
-                                
-                                with col_info:
-                                    st.markdown("**File Info:**")
-                                    st.markdown(f"- **Name:** {result['file_name']}")
-                                    st.markdown(f"- **Drive File ID:** {result['file_id']}")
-                                    st.markdown(f"- **Candidate ID:** {result['candidate_id']}")
-                                
-                                with col_data:
-                                    st.markdown("**Extracted Data:**")
-                                    st.json(result['data'], expanded=False)
-                    else:
-                        st.info("ℹ️ No new CV files found in the Google Drive folder.")
-                        
-                except Exception as e:
-                    st.error(f"❌ Error processing Google Drive files: {e}")
-                    logger.error(f"Google Drive sync error: {e}")
-    
-        # with col2:
-        #     st.markdown("**💡 Tips:**")
-        #     st.markdown("""
-        #     - Drop PDF CVs into your configured Google Drive folder
-        #     - Click 'Check for New CVs' to process them
-        #     - Processed files are automatically tracked to avoid duplicates
-        #     - Use the 'Job Matching' feature to find candidates for specific roles
-        #     """)
-        
-        # Auto-sync option (future enhancement)
-        st.markdown("---")
-        with st.expander("🔮 Future Features"):
-            st.markdown("""
-            **Coming Soon:**
-            - ⏰ Automatic periodic sync (every 15 minutes)
-            - 📧 Email notifications when new CVs are processed
-            - 📊 Processing history and logs
-            - 🔍 Support for additional file formats (DOCX, etc.)
-            """)
-
-
-# ───────────────────────────── Database Stats ──────────────────────────────────
-elif page == "Database Stats":
-    st.header("Database Dashboard")
-
-    # ER diagram
-    schema = _load_png("images/database_schema.png")
-    if schema:
-        st.image(schema, caption="ER-diagram", use_container_width=False)
-
-    # KPIs
-    stats = st.session_state.db.get_database_stats()
+def kpi_row(stats: Dict[str, int]):
     cols = st.columns(5)
-    cols[0].metric("Candidates", stats["total_candidates"])
-    cols[1].metric("Work Exps", stats["total_work_experiences"])
-    cols[2].metric("Educations", stats["total_educations"])
-    cols[3].metric("Skills", stats["total_skills"])
-    cols[4].metric("Projects", stats["total_projects"])
+    icons = ["👥", "💼", "🎓", "🛠️", "📋"]
+    keys = ["total_candidates", "total_work_experiences", "total_educations", "total_skills", "total_projects"]
+    labels = ["Candidates", "Work Exps", "Educations", "Skills", "Projects"]
+    for col, icon, key, label in zip(cols, icons, keys, labels):
+        with col:
+            st.markdown(f"""
+                <div class="metric-card">
+                    <div class="metric-value">{stats.get(key, 0)}</div>
+                    <div class="metric-label">{icon} {label}</div>
+                </div>
+            """, unsafe_allow_html=True)
 
+def display_progress(idx: int, total: int, label: str):
+    st.markdown(f"<div class='muted small'>{label} ({idx}/{total})</div>", unsafe_allow_html=True)
+    progress = idx / total
+    st.markdown(f"""
+        <div class="progress-bar">
+            <div class="progress-fill" style="width: {progress * 100}%"></div>
+        </div>
+    """, unsafe_allow_html=True)
+
+def export_json(data: Any, label: str, filename: str):
+    json_str = json.dumps(data, ensure_ascii=False, indent=2)
+    st.download_button(
+        label=label,
+        data=json_str,
+        file_name=filename,
+        mime="application/json",
+    )
+
+def export_csv(df: pd.DataFrame, filename: str):
+    csv = df.to_csv(index=False)
+    st.download_button(
+        label="⬇️ Export CSV",
+        data=csv,
+        file_name=filename,
+        mime="text/csv",
+    )
+
+# =============================================================================
+# Sidebar Navigation
+# =============================================================================
+with st.sidebar:
+    page = st.radio(
+        "Navigation",
+        ["🏠 Home", "⬆️ Upload & Sync", "🔍 Search & Match", "📊 Dashboard"],
+        label_visibility="collapsed",
+    )
     st.markdown("---")
+    st.caption("Powered by AI • Secure & Local Processing")
 
-    # charts --------------------------------------------------------------------
-    conn = st.session_state.db.conn
+# =============================================================================
+# Main Content
+# =============================================================================
+stats = st.session_state.db.get_database_stats()
+kpi_row(stats)
 
-    # résumé inflow
-    inflow = conn.execute(
-        """
-        SELECT strftime('%Y-%m', created_at) AS month, COUNT(*) AS cnt
-        FROM candidates
-        GROUP BY month ORDER BY month
-        """
-    ).fetchdf()
+if page == "🏠 Home":
+    st.header("Welcome to HR Resume Processing")
+    st.markdown("""
+        Streamline your recruitment workflow:
+        - **Upload & Sync**: Extract data from CVs automatically
+        - **Search & Match**: Find and rank talent
+        - **Dashboard**: View analytics and stats
+    """)
+
+elif page == "⬆️ Upload & Sync":
+    tab1, tab2 = st.tabs(["📤 Upload CVs", "☁️ Drive Sync"])
+
+    with tab1:
+        st.header("Upload CVs")
+        uploaded_files = st.file_uploader(
+            "Drop files here",
+            type=["pdf", "png", "jpg", "jpeg"],
+            accept_multiple_files=True,
+            help="Supports batch processing of resumes",
+        )
+
+        if uploaded_files:
+            st.success(f"{len(uploaded_files)} files uploaded. Ready to process?")
+            if st.button("Process Now", type="primary"):
+                results = []
+                with st.spinner("Processing files..."):
+                    for idx, file in enumerate(uploaded_files, 1):
+                        display_progress(idx, len(uploaded_files), f"Processing: {file.name}")
+                        path, bytes_data = save_upload_and_cache_bytes(file)
+                        try:
+                            structured = run_async(st.session_state.processor.process_resume(str(path)))
+                            cand_id = st.session_state.db.import_resume_data(structured)
+                            results.append({
+                                "name": file.name,
+                                "bytes": bytes_data,
+                                "candidate_id": cand_id,
+                                "data": structured,
+                                "is_pdf": file.name.lower().endswith(".pdf"),
+                            })
+                        except Exception as e:
+                            st.error(f"Error processing {file.name}: {e}")
+                        finally:
+                            path.unlink(missing_ok=True)  # Clean up after processing
+
+                st.success("Processing complete!")
+                st.subheader("Results")
+                for res in results:
+                    with st.expander(f"{res['name']} (ID: {res['candidate_id']})"):
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.subheader("Preview")
+                            if res["is_pdf"]:
+                                embed_pdf_from_bytes(res["bytes"])
+                            else:
+                                img = Image.open(BytesIO(res["bytes"]))
+                                st.image(img, use_column_width=True)
+                        with col2:
+                            st.subheader("Extracted Data")
+                            st.json(res["data"])
+                            export_json(res["data"], "⬇️ Export JSON", f"{res['candidate_id']}.json")
+
+        else:
+            st.warning("No files uploaded yet.")
+
+    with tab2:
+        st.header("Google Drive Sync")
+        stats = st.session_state.drive_processor.get_drive_stats()
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Total Processed", stats["total_processed_files"])
+        col2.metric("Last 7 Days", stats["files_processed_last_week"])
+        col3.metric("Status", "Active" if stats["configured"] else "Inactive")
+
+        if not stats["configured"]:
+            st.error("Please configure Google Drive in settings.")
+        else:
+            if st.button("Sync Now"):
+                with st.spinner("Syncing..."):
+                    new_files = run_async(st.session_state.drive_processor.process_new_files())
+                    if new_files:
+                        st.success(f"Processed {len(new_files)} new files")
+                        for file in new_files:
+                            st.markdown(f"""
+                                <div class="card">
+                                    <h5>{file['file_name']}</h5>
+                                    <p>ID: {file['candidate_id']}</p>
+                                </div>
+                            """, unsafe_allow_html=True)
+                    else:
+                        st.info("No new files.")
+
+elif page == "🔍 Search & Match":
+    tab1, tab2 = st.tabs(["🔎 Search Candidates", "🤖 Job Matching"])
+
+    with tab1:
+        st.header("Search Candidates")
+        skill = st.text_input("Enter skill keyword", placeholder="e.g., Python, SQL", help="Case-insensitive search")
+        if st.button("Search"):
+            with st.spinner("Searching..."):
+                rows = st.session_state.db.search_candidates_by_skill(skill)
+            if rows:
+                st.success(f"Found {len(rows)} candidates")
+                for cid, name, email, phone, desc in rows:
+                    st.markdown(f"""
+                        <div class="card">
+                            <h4>{name} (ID: {cid})</h4>
+                            <p class="muted">Email: {email} | Phone: {phone}</p>
+                            <p>{desc or 'No summary available'}</p>
+                        </div>
+                    """, unsafe_allow_html=True)
+            else:
+                st.info("No candidates found for this skill.")
+
+    with tab2:
+        st.header("AI Job Matching")
+        job_desc = st.text_area("Job Description", height=200, placeholder="Describe the role, skills, experience...")
+        top_n = st.slider("Number of top candidates", 1, 10, 5)
+        if st.button("Match Candidates", type="primary"):
+            with st.spinner("Matching..."):
+                try:
+                    matches = run_async(st.session_state.job_matcher.find_best_candidates(job_desc, top_n))
+                    if matches:
+                        st.success(f"Top {len(matches)} matches found")
+                        st.markdown("---")
+                        st.subheader("📊 Candidate Pool Analysis")
+                        
+                        gap_insights = st.session_state.job_matcher.get_gap_insights(matches)
+                        for insight in gap_insights:
+                            if insight.startswith("**"):
+                                st.markdown(insight)
+                            elif insight.strip() == "":
+                                st.write("")
+                            else:
+                                st.write(insight)
+                        
+                        # Optional: Show detailed gap statistics
+                        with st.expander("🔍 Detailed Gap Statistics"):
+                            gap_summary = st.session_state.job_matcher.analyze_candidate_gaps(matches)
+                            st.json(gap_summary.model_dump())
+                        
+                        for i, (cand, match) in enumerate(matches, 1):
+                            st.markdown(f"""
+                                <div class="card">
+                                    <h4>#{i} {cand['name']} (Score: {match.match_score:.0%})</h4>
+                                    <p class="muted">Email: {cand['email']} | Phone: {cand['phone']}</p>
+                                    <div>Skills: {', '.join(cand['skills'][:5]) + ('...' if len(cand['skills']) > 5 else '')}</div>
+                                    <div class="progress-bar"><div class="progress-fill" style="width:{match.match_score * 100}%"></div></div>
+                                    <h5>Reasoning</h5>
+                                    <p>{match.reasoning}</p>
+                                    <h5>Strengths</h5>
+                                    {' '.join([f'<span class="tag">{s}</span>' for s in match.strengths])}
+                                    <h5>Gaps</h5>
+                                    {' '.join([f'<span class="warning-tag">{g}</span>' for g in match.gaps])}
+                                </div>
+                            """, unsafe_allow_html=True)
+                    else:
+                        st.warning("No candidates available.")
+                except Exception as e:
+                    st.error(f"Error: {e}")
+
+elif page == "📊 Dashboard":
+    st.header("System Dashboard")
+    inflow = st.session_state.db.conn.execute("SELECT strftime('%Y-%m', created_at) AS month, COUNT(*) AS cnt FROM candidates GROUP BY month ORDER BY month").fetchdf()
     if not inflow.empty:
-        st.subheader("Monthly candidate inflow")
+        st.subheader("Candidate Inflow")
         st.line_chart(inflow.set_index("month"))
 
-    # top skills
-    top_skills = conn.execute(
-        """
-        SELECT sm.skill_name AS skill, COUNT(*) AS cnt
-        FROM skills_master sm
-        JOIN candidate_skills cs ON sm.skill_id = cs.skill_id
-        GROUP BY sm.skill_name ORDER BY cnt DESC LIMIT 10
-        """
-    ).fetchdf()
+    top_skills = st.session_state.db.conn.execute("SELECT sm.skill_name AS skill, COUNT(*) AS cnt FROM skills_master sm JOIN candidate_skills cs ON sm.skill_id = cs.skill_id GROUP BY sm.skill_name ORDER BY cnt DESC LIMIT 10").fetchdf()
     if not top_skills.empty:
-        st.subheader("Top 10 skills in current database")
-        st.bar_chart(top_skills.set_index("skill").sort_values("cnt"))
+        st.subheader("Top Skills")
+        st.bar_chart(top_skills.set_index("skill"))
 
-    # grad-year distribution
-    grad = conn.execute(
-        """
-        SELECT graduation_year AS year, COUNT(*) AS cnt
-        FROM education
-        WHERE graduation_year <> ''
-        GROUP BY graduation_year ORDER BY year
-        """
-    ).fetchdf()
+    grad = st.session_state.db.conn.execute("SELECT graduation_year AS year, COUNT(*) AS cnt FROM education WHERE graduation_year <> '' GROUP BY graduation_year ORDER BY year").fetchdf()
     if not grad.empty:
-        st.subheader("Graduation year distribution")
+        st.subheader("Graduation Years")
         st.bar_chart(grad.set_index("year"))
+
+# Footer
+st.markdown("<div class='footer'>© 2025 HR System</div>", unsafe_allow_html=True)

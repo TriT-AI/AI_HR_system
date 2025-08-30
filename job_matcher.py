@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import logging
 from typing import Dict, List, Optional, Tuple
+from collections import Counter
 from pydantic import BaseModel, Field
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import AzureChatOpenAI
@@ -37,15 +38,18 @@ class CandidateMatch(BaseModel):
     gaps: List[str] = Field(description="Areas where candidate may need development", default_factory=list)
     reasoning: str = Field(description="Detailed explanation of why this candidate is a good fit", default="")
 
-class BatchCandidateEvaluation(BaseModel):
-    evaluations: List[CandidateMatch] = Field(description="List of candidate evaluations")
+class GapSummary(BaseModel):
+    most_common_gaps: List[str] = Field(description="Most frequently mentioned gaps across candidates")
+    gap_frequency: Dict[str, int] = Field(description="Gap occurrence count", default_factory=dict)
+    total_candidates: int = Field(description="Total number of candidates evaluated")
+    summary_insight: str = Field(description="Overall insight about candidate pool gaps")
 
 class JobMatcher:
     def __init__(self, database):
         self.db = database
         self._job_requirements_cache = {}
-        self._max_concurrent_llm_calls = 5  # Reduced for batch processing
-        self._batch_size = 3  # Process 3 candidates per LLM call
+        self._max_concurrent_llm_calls = 5
+        self._batch_size = 2  # Reduced batch size for better parsing reliability
         
         self.job_analysis_prompt = ChatPromptTemplate.from_template("""
 You are an expert HR analyst. Analyze the following job description and extract key requirements.
@@ -57,8 +61,8 @@ Extract and structure the key requirements including required skills, preferred 
 Be specific and comprehensive in identifying technical skills, soft skills, and domain expertise.
         """)
         
-        self.batch_candidate_evaluation_prompt = ChatPromptTemplate.from_template("""
-You are an expert HR recruiter. Evaluate how well these candidates match the job requirements.
+        self.single_candidate_evaluation_prompt = ChatPromptTemplate.from_template("""
+You are an expert HR recruiter. Evaluate how well this candidate matches the job requirements.
 
 Job Requirements:
 - Required Skills: {required_skills}
@@ -67,10 +71,14 @@ Job Requirements:
 - Industry: {industry}
 - Role Type: {role_type}
 
-Candidates to Evaluate:
-{candidates_data}
+Candidate Profile:
+- Name: {candidate_name}
+- Skills: {candidate_skills}
+- Experience: {candidate_experience}
+- Education: {candidate_education}
+- Description: {candidate_description}
 
-For EACH candidate, provide:
+Provide:
 1. Overall match score (0.0 to 1.0)
 2. Skills match score (0.0 to 1.0)
 3. Experience match score (0.0 to 1.0)
@@ -78,7 +86,7 @@ For EACH candidate, provide:
 5. List of potential gaps or areas for development
 6. Detailed reasoning explaining why this candidate is/isn't a good fit
 
-Be objective, specific, and provide actionable insights for each candidate.
+Be objective, specific, and provide actionable insights.
         """)
 
     async def analyze_job_description(self, job_description: str) -> JobRequirements:
@@ -103,7 +111,7 @@ Be objective, specific, and provide actionable insights for each candidate.
                 result = JobRequirements(**requirements)
             
             self._job_requirements_cache[job_hash] = result
-            logger.info(f"Job requirements extracted and cached")
+            logger.info("Job requirements extracted and cached")
             return result
                 
         except Exception as e:
@@ -111,7 +119,7 @@ Be objective, specific, and provide actionable insights for each candidate.
             return JobRequirements()
 
     def get_all_candidate_details(self, limit: int = None) -> Dict[int, Dict]:
-        """Get all candidates with their details in one query - with date conversion fix."""
+        """Get all candidates with their details in one query."""
         sql = """
         SELECT 
             c.candidate_id,
@@ -161,86 +169,15 @@ Be objective, specific, and provide actionable insights for each candidate.
         logger.info(f"Retrieved details for {len(results)} candidates")
         return results
 
-
-    def format_candidate_for_batch(self, candidate_details: Dict) -> str:
-        """Format candidate data for batch evaluation."""
-        return f"""
-Candidate ID: {candidate_details['candidate_id']}
-Name: {candidate_details['name']}
-Skills: {', '.join(candidate_details['skills']) if candidate_details['skills'] else 'None listed'}
-Experience: {'; '.join(candidate_details['experience']) if candidate_details['experience'] else 'None listed'}
-Education: {'; '.join(candidate_details['education']) if candidate_details['education'] else 'None listed'}
-Description: {candidate_details['description'] or 'None provided'}
----"""
-
-    async def batch_evaluate_candidates(self, candidates_batch: List[Dict], job_requirements: JobRequirements) -> List[CandidateMatch]:
-        """Evaluate multiple candidates in a single LLM call."""
-        try:
-            candidates_text = "\n".join([
-                self.format_candidate_for_batch(candidate) 
-                for candidate in candidates_batch
-            ])
-            
-            # Use a simpler approach - ask for JSON response
-            response = await llm.ainvoke([{
-                "role": "user",
-                "content": self.batch_candidate_evaluation_prompt.format(
-                    required_skills=", ".join(job_requirements.required_skills),
-                    preferred_skills=", ".join(job_requirements.preferred_skills),
-                    experience_level=job_requirements.experience_level,
-                    industry=job_requirements.industry,
-                    role_type=job_requirements.role_type,
-                    candidates_data=candidates_text
-                )
-            }])
-            
-            # Parse the response and create CandidateMatch objects
-            results = []
-            response_text = response.content
-            
-            # Simple fallback: evaluate individually if batch fails
-            logger.warning("Batch evaluation parsing failed, falling back to individual evaluation")
-            for candidate in candidates_batch:
-                individual_result = await self.evaluate_candidate_individual(candidate, job_requirements)
-                results.append(individual_result)
-            
-            return results
-            
-        except Exception as e:
-            logger.error(f"Batch evaluation failed: {e}, falling back to individual evaluation")
-            # Fallback to individual evaluation
-            results = []
-            for candidate in candidates_batch:
-                individual_result = await self.evaluate_candidate_individual(candidate, job_requirements)
-                results.append(individual_result)
-            return results
-
     async def evaluate_candidate_individual(self, candidate_details: Dict, job_requirements: JobRequirements) -> CandidateMatch:
-        """Evaluate a single candidate (fallback method)."""
+        """Evaluate a single candidate."""
         try:
             structured_llm = llm.with_structured_output(CandidateMatch)
-            
-            # Simplified single candidate prompt
-            single_prompt = ChatPromptTemplate.from_template("""
-Evaluate this candidate for the job requirements.
-
-Job: {role_type} role requiring {required_skills} in {industry}
-Experience Level: {experience_level}
-
-Candidate:
-- Name: {candidate_name}
-- Skills: {candidate_skills}
-- Experience: {candidate_experience}
-- Education: {candidate_education}
-- Description: {candidate_description}
-
-Provide match score (0.0-1.0), skills match, experience match, strengths, gaps, and reasoning.
-            """)
-            
-            evaluation_chain = single_prompt | structured_llm
+            evaluation_chain = self.single_candidate_evaluation_prompt | structured_llm
             
             evaluation = await evaluation_chain.ainvoke({
                 "required_skills": ", ".join(job_requirements.required_skills) or "Any relevant skills",
+                "preferred_skills": ", ".join(job_requirements.preferred_skills) or "None specified",
                 "experience_level": job_requirements.experience_level or "Any level",
                 "industry": job_requirements.industry or "Any industry",
                 "role_type": job_requirements.role_type or "General",
@@ -263,22 +200,22 @@ Provide match score (0.0-1.0), skills match, experience match, strengths, gaps, 
             logger.error(f"Individual evaluation failed for {candidate_details['name']}: {e}")
             return CandidateMatch(
                 candidate_id=candidate_details["candidate_id"],
-                match_score=0.1,  # Give small score so they're not completely filtered out
+                match_score=0.1,
                 skill_match_score=0.1,
                 experience_match_score=0.1,
-                reasoning=f"Evaluation failed but candidate exists: {candidate_details['name']}"
+                reasoning=f"Evaluation failed: {str(e)}",
+                gaps=["Evaluation error - manual review needed"]
             )
 
     async def find_best_candidates(self, job_description: str, top_n: int = 5) -> List[Tuple[Dict, CandidateMatch]]:
-        """Optimized flow focusing on LLM efficiency rather than DB filtering."""
+        """Find and rank the best candidates for a job."""
         logger.info(f"Starting candidate matching for top {top_n} candidates")
         
-        # Step 1: Analyze job requirements (1 LLM call)
+        # Step 1: Analyze job requirements
         job_requirements = await self.analyze_job_description(job_description)
         
-        # Step 2: Get all candidates (1 DB query, no filtering)
-        # Limit to reasonable number to avoid overwhelming LLM
-        candidate_limit = min(top_n * 20, 100)  # Get more candidates but cap at 100
+        # Step 2: Get all candidates
+        candidate_limit = min(top_n * 20, 100)
         all_candidate_details = self.get_all_candidate_details(limit=candidate_limit)
         
         if not all_candidate_details:
@@ -288,37 +225,24 @@ Provide match score (0.0-1.0), skills match, experience match, strengths, gaps, 
         candidates_list = list(all_candidate_details.values())
         logger.info(f"Processing {len(candidates_list)} candidates")
         
-        # Step 3: Process candidates in batches with concurrency
+        # Step 3: Evaluate candidates individually (more reliable than batch)
         semaphore = asyncio.Semaphore(self._max_concurrent_llm_calls)
         
-        async def process_batch_with_limit(batch):
+        async def evaluate_with_limit(candidate):
             async with semaphore:
-                return await self.batch_evaluate_candidates(batch, job_requirements)
+                return await self.evaluate_candidate_individual(candidate, job_requirements)
         
-        # Create batches
-        batches = []
-        for i in range(0, len(candidates_list), self._batch_size):
-            batch = candidates_list[i:i + self._batch_size]
-            batches.append(batch)
+        # Process all candidates concurrently
+        evaluation_tasks = [evaluate_with_limit(candidate) for candidate in candidates_list]
+        evaluation_results = await asyncio.gather(*evaluation_tasks, return_exceptions=True)
         
-        logger.info(f"Created {len(batches)} batches of {self._batch_size} candidates each")
-        
-        # Process all batches concurrently
-        batch_results = await asyncio.gather(
-            *[process_batch_with_limit(batch) for batch in batches],
-            return_exceptions=True
-        )
-        
-        # Flatten results and pair with candidate details
+        # Pair candidates with their evaluations
         candidate_matches = []
-        for batch_idx, batch_result in enumerate(batch_results):
-            if isinstance(batch_result, Exception):
-                logger.error(f"Batch {batch_idx} failed: {batch_result}")
+        for candidate, result in zip(candidates_list, evaluation_results):
+            if isinstance(result, Exception):
+                logger.error(f"Error evaluating candidate {candidate['name']}: {result}")
                 continue
-                
-            batch = batches[batch_idx]
-            for candidate, match_result in zip(batch, batch_result):
-                candidate_matches.append((candidate, match_result))
+            candidate_matches.append((candidate, result))
         
         # Step 4: Sort by match score and return top N
         candidate_matches.sort(key=lambda x: x[1].match_score, reverse=True)
@@ -330,6 +254,63 @@ Provide match score (0.0-1.0), skills match, experience match, strengths, gaps, 
             logger.info(f"Score range: {max(scores):.2f} - {min(scores):.2f}")
         
         return final_matches
+
+    def analyze_candidate_gaps(self, candidate_matches: List[Tuple[Dict, CandidateMatch]]) -> GapSummary:
+        """Analyze and summarize gaps across all matched candidates."""
+        if not candidate_matches:
+            return GapSummary(
+                most_common_gaps=[],
+                gap_frequency={},
+                total_candidates=0,
+                summary_insight="No candidates to analyze"
+            )
+        
+        # Collect all gaps
+        all_gaps = []
+        for _, match in candidate_matches:
+            all_gaps.extend(match.gaps)
+        
+        # Count gap frequency
+        gap_counter = Counter(all_gaps)
+        gap_frequency = dict(gap_counter)
+        
+        # Get most common gaps
+        most_common = gap_counter.most_common(10)  # Top 10 most common gaps
+        most_common_gaps = [gap for gap, count in most_common]
+        
+        # Generate summary insight
+        total_candidates = len(candidate_matches)
+        if most_common:
+            top_gap = most_common[0][0]
+            top_gap_percentage = (most_common[0][1] / total_candidates) * 100
+            summary_insight = f"The most common gap is '{top_gap}' affecting {most_common[0][1]} out of {total_candidates} candidates ({top_gap_percentage:.1f}%). This suggests a talent shortage in this area."
+        else:
+            summary_insight = "All candidates appear well-matched with minimal gaps identified."
+        
+        return GapSummary(
+            most_common_gaps=most_common_gaps,
+            gap_frequency=gap_frequency,
+            total_candidates=total_candidates,
+            summary_insight=summary_insight
+        )
+
+    def get_gap_insights(self, candidate_matches: List[Tuple[Dict, CandidateMatch]]) -> List[str]:
+        """Get formatted gap insights for display."""
+        gap_summary = self.analyze_candidate_gaps(candidate_matches)
+        
+        if not gap_summary.most_common_gaps:
+            return ["No significant gaps identified across candidates."]
+        
+        insights = [gap_summary.summary_insight]
+        insights.append("")  # Empty line for spacing
+        insights.append("**Most Common Gaps:**")
+        
+        for gap in gap_summary.most_common_gaps:
+            count = gap_summary.gap_frequency[gap]
+            percentage = (count / gap_summary.total_candidates) * 100
+            insights.append(f"• {gap} ({count}/{gap_summary.total_candidates} candidates, {percentage:.1f}%)")
+        
+        return insights
 
     def clear_cache(self):
         """Clear the job requirements cache."""
