@@ -30,17 +30,20 @@ A streamlined, end-to-end HR assistant that ingests candidate resumes (PDF or im
 ## Project Structure
 
 ```
-AI_HR_system/
-├─ app.py                      # Streamlit UI
-├─ cv_processor.py             # OCR + LLM extraction workflow
-├─ database.py                 # DuckDB schema and I/O
-├─ config.py                   # Typed settings + .env loader
-├─ requirements.txt            # Python dependencies
-├─ .env.example                # Example environment variables
-├─ .streamlit/
-│  └─ config.toml             # App theme
-└─ assets/
-   └─ screenshot.png          # UI screenshot (optional)
+AI_hr_system/
+├── app.py                  # Main entry point (handles home page and shared code)
+├── pages/                  # Folder for page views (Streamlit auto-detects this)
+│   ├── upload_and_sync.py  # Code for "Upload & Sync" page
+│   ├── search_and_match.py # Code for "Search & Match" page
+│   └── dashboard.py        # Code for "Dashboard" page
+├── utils.py                # New file for shared helpers, imports, and session state
+├── config.py               # (Assuming this exists; otherwise, keep in utils.py)
+├── cv_processor.py         # Existing backend files (unchanged)
+├── database.py
+├── job_matcher.py
+├── google_drive_processor.py
+└── hr_resume_system.db     # Database file
+
 ```
 
 

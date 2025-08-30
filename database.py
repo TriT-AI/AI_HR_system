@@ -313,6 +313,31 @@ class ResumeDatabase:
         """
         return self.conn.execute(sql, [f"%{skill}%"]).fetchall()
 
+    def search_candidates_by_skill_and_experience(self, skill: str, min_years_exp: int) -> List[tuple]:
+        """
+        Search candidates by skill (LIKE matching) and minimum years of total work experience.
+        Uses DuckDB's JULIAN function for date differences.
+        Returns list of (candidate_id, name, email, phone, candidate_description) tuples.
+        """
+        sql = """
+        SELECT c.candidate_id,
+            c.name,
+            c.email,
+            c.phone,
+            c.candidate_description
+        FROM candidates c
+        JOIN candidate_skills cs ON c.candidate_id = cs.candidate_id
+        JOIN skills_master sm ON cs.skill_id = sm.skill_id
+        LEFT JOIN work_experience we ON c.candidate_id = we.candidate_id
+        WHERE LOWER(sm.skill_name) LIKE LOWER(?)
+        GROUP BY c.candidate_id, c.name, c.email, c.phone, c.candidate_description
+        HAVING SUM(COALESCE(
+            JULIAN(COALESCE(we.end_date, CURRENT_DATE)) - JULIAN(we.start_date), 0)) / 365.25 >= ?
+        ORDER BY c.name
+        """
+        return self.conn.execute(sql, [f"%{skill}%", min_years_exp]).fetchall()
+
+
     def get_database_stats(self) -> Dict[str, int]:
         return {
             "total_candidates":        self._exec_scalar_int("SELECT COUNT(*) FROM candidates"),
