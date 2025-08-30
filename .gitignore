@@ -7,6 +7,7 @@ __pycache__/
 *.so
 *.db
 .vscode
+hr_resume_system.db.wal
 # Distribution / packaging
 .Python
 build/

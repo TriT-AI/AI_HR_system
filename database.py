@@ -5,7 +5,7 @@ database.py
 • Stores résumé data in a local DuckDB file.
 • Creates/updates the schema on startup (Snowflake-style star schema).
 • Saves an up-to-date ER diagram as images/database_schema.png **before** the
-  “Snowflake schema verified/created successfully” log line.
+  "Snowflake schema verified/created successfully" log line.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 def _to_iso_date_or_none(value) -> Optional[str]:
     """
     Convert many human date formats to ISO-8601 **YYYY-MM-DD**.
-    Returns None for empty/“present” values so DB DATE columns accept NULL.
+    Returns None for empty/"present" values so DB DATE columns accept NULL.
     """
     if value is None:
         return None
@@ -45,7 +45,7 @@ def _to_iso_date_or_none(value) -> Optional[str]:
     if re.fullmatch(r"\d{4}", s):
         return f"{s}-01-01"
 
-    # “Jan 2023”, “March 2020” …
+    # "Jan 2023", "March 2020" …
     m = re.fullmatch(r"([A-Za-z]+)\s+(\d{4})", s)
     if m:
         months = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
@@ -60,7 +60,6 @@ def _to_iso_date_or_none(value) -> Optional[str]:
         return dt.date().isoformat()
     except Exception:
         return None
-
 
 # ── Main DB class ───────────────────────────────────────────────────────────────
 class ResumeDatabase:
@@ -322,6 +321,56 @@ class ResumeDatabase:
             "total_skills":            self._exec_scalar_int("SELECT COUNT(*) FROM skills_master"),
             "total_projects":          self._exec_scalar_int("SELECT COUNT(*) FROM projects"),
         }
+
+    # ── Additional methods for job matching ─────────────────────────────────
+    def get_candidates_with_skills_summary(self) -> List[Dict]:
+        """Get all candidates with their skills summary for matching."""
+        sql = """
+        SELECT 
+            c.candidate_id,
+            c.name,
+            c.email,
+            c.phone,
+            c.candidate_description,
+            GROUP_CONCAT(sm.skill_name, ', ') as skills
+        FROM candidates c
+        LEFT JOIN candidate_skills cs ON c.candidate_id = cs.candidate_id
+        LEFT JOIN skills_master sm ON cs.skill_id = sm.skill_id
+        GROUP BY c.candidate_id, c.name, c.email, c.phone, c.candidate_description
+        ORDER BY c.created_at DESC
+        """
+        return [
+            {
+                "candidate_id": row[0],
+                "name": row[1],
+                "email": row[2],
+                "phone": row[3],
+                "description": row[4],
+                "skills": row[5].split(", ") if row[5] else []
+            }
+            for row in self.conn.execute(sql).fetchall()
+        ]
+
+    def search_candidates_by_multiple_skills(self, skills: List[str]) -> List[tuple]:
+        """Search candidates who have any of the specified skills."""
+        if not skills:
+            return []
+        
+        sql = f"""
+        SELECT DISTINCT c.candidate_id,
+               c.name,
+               c.email,
+               c.phone,
+               c.candidate_description,
+               COUNT(DISTINCT sm.skill_id) as matching_skills
+        FROM candidates c
+        JOIN candidate_skills cs ON c.candidate_id = cs.candidate_id
+        JOIN skills_master sm ON cs.skill_id = sm.skill_id
+        WHERE LOWER(sm.skill_name) IN ({",".join([f"LOWER(?)" for _ in skills])})
+        GROUP BY c.candidate_id, c.name, c.email, c.phone, c.candidate_description
+        ORDER BY matching_skills DESC, c.name
+        """
+        return self.conn.execute(sql, skills).fetchall()
 
     def close(self) -> None:
         self.conn.close()

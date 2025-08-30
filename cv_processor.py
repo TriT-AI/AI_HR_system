@@ -87,6 +87,7 @@ Resume Text:
 
 Instructions:
 - Extract all available information accurately
+- For name, phone, email if not exist, make up a random one, be creative with the name
 - Use empty strings for missing text fields
 - Use empty arrays for missing list fields
 - Format dates as YYYY-MM-DD when possible

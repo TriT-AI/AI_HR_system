@@ -1,3 +1,4 @@
+# config.py
 from __future__ import annotations
 
 import os
@@ -24,6 +25,10 @@ class Settings(BaseSettings):
     AZURE_OPENAI_API_KEY: SecretStr = Field(default=..., description="Azure OpenAI API key")
     AZURE_OPENAI_DEPLOYMENT: str = Field(default=..., description="Deployment name (e.g., gpt-4.1-mini)")
     AZURE_OPENAI_API_VERSION: str = Field(default="2025-04-01-preview", description="AOAI API version")
+
+    # Google Drive Configuration
+    GOOGLE_DRIVE_API_KEY: str = Field(default="", description="Google Drive API key")
+    GOOGLE_DRIVE_FOLDER_ID: str = Field(default="", description="Google Drive folder ID to monitor")
 
     # Database
     DUCKDB_PATH: str = Field(default="hr_resume_system.db", description="DuckDB file path")
