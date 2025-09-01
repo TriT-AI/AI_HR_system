@@ -391,27 +391,6 @@ def main():
 
     st.markdown("---")
 
-    # Inflow over time (filtered)
-    st.subheader("Candidate Inflow Over Time")
-    inflow = fetch_inflow(candidate_ids)
-    if not inflow.empty:
-        inflow_chart = (
-            alt.Chart(inflow)
-            .mark_line(point=True)
-            .encode(
-                x=alt.X("month:T", title="Month"),
-                y=alt.Y("cnt:Q", title="Candidates"),
-                tooltip=["month", "cnt"],
-            )
-            .interactive()
-            .properties(height=280)
-        )
-        st.altair_chart(inflow_chart, use_container_width=True)
-    else:
-        st.info("No inflow data for the filtered set.")
-
-    st.markdown("---")
-
     # Candidate table + export
     st.subheader("Candidate Summary")
     show_df = filtered[["name", "skills_matched", "years_experience"]].rename(
